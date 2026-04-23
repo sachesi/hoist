@@ -27,4 +27,6 @@ pub enum HoistSubcommand {
     PrintConfigPaths,
     Inspect,
     HelperInfo,
+    /// Remove orphaned state files left by SIGKILL'd hoist processes.
+    Cleanup,
 }

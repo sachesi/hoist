@@ -70,6 +70,36 @@ fn write_secure(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Returns the paths of orphaned state files: those whose recorded child PID is no longer alive.
+pub fn find_orphaned_state_files(uid: u32) -> Vec<PathBuf> {
+    let dir = runtime_dir(uid);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return vec![];
+    };
+    let mut orphans = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(state) = RuntimeState::load(&path) else {
+            continue;
+        };
+        let Some(child_pid) = state.child_pid else {
+            orphans.push(path);
+            continue;
+        };
+        if !pid_is_alive(child_pid) {
+            orphans.push(path);
+        }
+    }
+    orphans
+}
+
+fn pid_is_alive(pid: i32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
 pub fn create_state_file(uid: u32) -> Result<PathBuf> {
     let dir = runtime_dir(uid);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

@@ -31,6 +31,7 @@ pub struct Global {
     pub require_all: bool,
     pub log_level: Option<String>,
     pub default_profile: String,
+    pub helper_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

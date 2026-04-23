@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
-const HELPER_TIMEOUT: Duration = Duration::from_secs(8);
-const TUNED_TIMEOUT: Duration = Duration::from_secs(8);
+pub const DEFAULT_HELPER_TIMEOUT_SECS: u64 = 8;
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn run_argv(argv: &[String]) -> Result<()> {
@@ -70,19 +69,19 @@ where
     }
 }
 
-pub fn run_pkexec_gpuctl(args: &[&str]) -> Result<()> {
-    run_pkexec(GPUCTL_PATH, args)
+pub fn run_pkexec_gpuctl(args: &[&str], timeout: Duration) -> Result<()> {
+    run_pkexec(GPUCTL_PATH, args, timeout)
 }
 
-fn run_pkexec(helper_path: &str, args: &[&str]) -> Result<()> {
+fn run_pkexec(helper_path: &str, args: &[&str], timeout: Duration) -> Result<()> {
     let mut argv = vec![helper_path];
     argv.extend_from_slice(args);
 
-    match run_command_with_timeout("pkexec", argv, HELPER_TIMEOUT) {
+    match run_command_with_timeout("pkexec", argv, timeout) {
         Ok(()) => Ok(()),
         Err(CommandRunError::Launch(e)) => bail!("pkexec launch failed: {e}"),
-        Err(CommandRunError::Timeout(timeout)) => {
-            bail!("helper timed out after {}s", timeout.as_secs())
+        Err(CommandRunError::Timeout(t)) => {
+            bail!("helper timed out after {}s", t.as_secs())
         }
         Err(CommandRunError::Exit(status)) => bail!("helper exited with status {status}"),
     }
@@ -113,12 +112,12 @@ pub fn parse_tuned_active(raw: &str) -> Option<String> {
     None
 }
 
-pub fn tuned_set_profile(profile: &str) -> Result<()> {
-    match run_command_with_timeout("tuned-adm", ["profile", profile], TUNED_TIMEOUT) {
+pub fn tuned_set_profile(profile: &str, timeout: Duration) -> Result<()> {
+    match run_command_with_timeout("tuned-adm", ["profile", profile], timeout) {
         Ok(()) => Ok(()),
         Err(CommandRunError::Launch(e)) => bail!("failed to launch tuned-adm: {e}"),
-        Err(CommandRunError::Timeout(timeout)) => {
-            bail!("tuned-adm timed out after {}s", timeout.as_secs())
+        Err(CommandRunError::Timeout(t)) => {
+            bail!("tuned-adm timed out after {}s", t.as_secs())
         }
         Err(CommandRunError::Exit(status)) => {
             bail!("tuned-adm profile {profile} failed: {status}")

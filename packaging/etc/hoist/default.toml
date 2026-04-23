@@ -13,6 +13,8 @@ require_all = false
 log_level = "info"
 # Profile used when --profile is not set.
 default_profile = "default"
+# Timeout in seconds for tuned-adm and pkexec helper calls (default: 8).
+# helper_timeout_secs = 8
 
 [profile.default.cpu]
 # Enable CPU tweaks for this profile.

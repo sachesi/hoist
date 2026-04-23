@@ -1,6 +1,6 @@
 Name:           hoist
-Version:        0.2.4
-Release:        5%{?dist}
+Version:        0.2.5
+Release:        1%{?dist}
 Summary:        Minimal per-command Linux performance tweak wrapper
 
 License:        MIT
@@ -81,6 +81,13 @@ install -Dpm 0644 packaging/etc/polkit-1/rules.d/50-hoist.rules \
 %{_datadir}/zsh/site-functions/_hoist
 
 %changelog
+* Wed Apr 23 2026 hoist maintainers
+- 0.2.5
+- add configurable helper_timeout_secs to [global] config (default 8s)
+- add structured logging via tracing crate; respects log_level config and RUST_LOG env var
+- add integration test suite (tests/integration.rs)
+- add hoist cleanup subcommand to remove orphaned state files
+
 * Thu Apr 23 2026 hoist maintainers
 - 0.2.4
 - add per-profile CPU/GPU enabled toggles (CPU default enabled, GPU default disabled)

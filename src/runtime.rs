@@ -4,10 +4,11 @@ use crate::procutil::{
 };
 use crate::state::{RuntimeState, create_state_file};
 use crate::system::{
-    gpuctl_exists, read_gpu_level, run_argv, run_pkexec_gpuctl, run_shell, tuned_active,
-    tuned_set_profile,
+    DEFAULT_HELPER_TIMEOUT_SECS, gpuctl_exists, read_gpu_level, run_argv, run_pkexec_gpuctl,
+    run_shell, tuned_active, tuned_set_profile,
 };
 use anyhow::{Context, Result, bail};
+use tracing::{debug, info, warn};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use nix::sys::signalfd::{SfdFlags, SignalFd};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
@@ -70,7 +71,7 @@ pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<
             restore_all(cfg, profile, &state)?;
             return Err(e).context("failed to set process priority");
         }
-        eprintln!("hoist: warning: failed to set nice={}: {e}", proc_cfg.nice);
+        warn!("failed to set nice={}: {e}", proc_cfg.nice);
     }
 
     let mut sigset = SigSet::empty();
@@ -84,7 +85,7 @@ pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<
 
     let code = loop {
         if let Some(sig) = read_signal(&sfd)? {
-            eprintln!("hoist: forwarding signal {sig} to child process group");
+            info!("forwarding signal {sig} to child process group");
             if let Some(pgid) = state.child_pgid {
                 kill_process_group(pgid, sig).ok();
             }
@@ -133,20 +134,30 @@ fn read_signal(sfd: &SignalFd) -> Result<Option<Signal>> {
     }
 }
 
+fn helper_timeout(cfg: &Config) -> Duration {
+    Duration::from_secs(
+        cfg.global
+            .helper_timeout_secs
+            .unwrap_or(DEFAULT_HELPER_TIMEOUT_SECS),
+    )
+}
+
 fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Result<()> {
+    let timeout = helper_timeout(cfg);
+
     if let Some(cpu) = &profile.cpu {
         if !cpu.enabled() {
-            eprintln!("hoist: cpu tweaks disabled by profile");
+            debug!("cpu tweaks disabled by profile");
         } else {
             let prev = tuned_active()?;
             state.previous_tuned_profile = prev;
-            eprintln!("hoist: applying tuned profile {}", cpu.enter_profile);
-            let result = tuned_set_profile(&cpu.enter_profile);
+            info!("applying tuned profile {}", cpu.enter_profile);
+            let result = tuned_set_profile(&cpu.enter_profile, timeout);
             if let Err(e) = result {
                 if cfg.global.require_all {
                     return Err(e);
                 }
-                eprintln!("hoist: warning: {e}");
+                warn!("{e}");
             } else {
                 state.cpu_applied = true;
             }
@@ -155,30 +166,27 @@ fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Res
 
     if let Some(gpu) = &profile.gpu {
         if !gpu.enabled() {
-            eprintln!("hoist: gpu tweaks disabled by profile");
+            debug!("gpu tweaks disabled by profile");
         } else {
-            eprintln!("hoist: warning: gpu tweaks enabled; use at your own risk");
+            warn!("gpu tweaks enabled; use at your own risk");
             if let Ok(prev) = read_gpu_level(gpu.card) {
                 state.previous_amdgpu_level = Some(prev.as_str().to_string());
             }
-            eprintln!(
-                "hoist: setting amdgpu card{} level {}",
+            info!(
+                "setting amdgpu card{} level {}",
                 gpu.card,
                 gpu.enter_level.as_str()
             );
             let card = gpu.card.to_string();
-            let result = run_pkexec_gpuctl(&[
-                "apply",
-                "--card",
-                &card,
-                "--level",
-                gpu.enter_level.as_str(),
-            ]);
+            let result = run_pkexec_gpuctl(
+                &["apply", "--card", &card, "--level", gpu.enter_level.as_str()],
+                timeout,
+            );
             if let Err(e) = result {
                 if cfg.global.require_all {
                     return Err(e);
                 }
-                eprintln!("hoist: warning: {e}");
+                warn!("{e}");
             } else {
                 state.gpu_applied = true;
             }
@@ -199,8 +207,8 @@ fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Res
     if let Some(proc_cfg) = &profile.process
         && proc_cfg.nice < -10
     {
-        eprintln!(
-            "hoist: warning: configured nice={} is below packaged policy (@hoist - nice -15)",
+        warn!(
+            "configured nice={} is below packaged policy (@hoist - nice -15)",
             proc_cfg.nice
         );
     }
@@ -208,16 +216,18 @@ fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Res
     Ok(())
 }
 
-fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result<()> {
+fn restore_all(cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result<()> {
+    let timeout = helper_timeout(cfg);
+
     if let Some(cpu) = &profile.cpu
         && cpu.enabled()
         && state.cpu_applied
     {
         let target = choose_cpu_restore_target(cpu, state);
         if let Some(target_profile) = target {
-            eprintln!("hoist: restoring tuned profile {target_profile}");
-            if let Err(e) = tuned_set_profile(&target_profile) {
-                eprintln!("hoist: warning: cpu restore failed: {e}");
+            info!("restoring tuned profile {target_profile}");
+            if let Err(e) = tuned_set_profile(&target_profile, timeout) {
+                warn!("cpu restore failed: {e}");
             }
         }
     }
@@ -228,10 +238,12 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     {
         let target = choose_gpu_restore_target(gpu, state);
         if let Some(level) = target {
-            eprintln!("hoist: restoring amdgpu level {level}");
+            info!("restoring amdgpu level {level}");
             let card = gpu.card.to_string();
-            if let Err(e) = run_pkexec_gpuctl(&["revert", "--card", &card, "--level", &level]) {
-                eprintln!("hoist: warning: gpu restore failed: {e}");
+            if let Err(e) =
+                run_pkexec_gpuctl(&["revert", "--card", &card, "--level", &level], timeout)
+            {
+                warn!("gpu restore failed: {e}");
             }
         }
     }
@@ -241,12 +253,12 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     {
         for cmd in &hooks.stop {
             if let Err(e) = run_argv(cmd) {
-                eprintln!("hoist: warning: stop hook failed: {e}");
+                warn!("stop hook failed: {e}");
             }
         }
         for cmd in &hooks.stop_sh {
             if let Err(e) = run_shell(cmd) {
-                eprintln!("hoist: warning: stop hook failed: {e}");
+                warn!("stop hook failed: {e}");
             }
         }
     }
@@ -262,12 +274,12 @@ fn wait_for_process_group_exit(pgid: i32, poll_interval_ms: u64) {
             Ok(true) => {}
             Ok(false) => break,
             Err(e) => {
-                eprintln!("hoist: warning: failed to inspect process group {pgid}: {e}");
+                warn!("failed to inspect process group {pgid}: {e}");
                 break;
             }
         }
         if Instant::now() >= deadline {
-            eprintln!("hoist: warning: timed out waiting for process group {pgid} to exit");
+            warn!("timed out waiting for process group {pgid} to exit");
             break;
         }
         std::thread::sleep(poll_interval);
@@ -460,6 +472,7 @@ mod tests {
                 require_all: false,
                 log_level: None,
                 default_profile: "default".to_string(),
+                helper_timeout_secs: None,
             },
             profile: profiles,
         };
