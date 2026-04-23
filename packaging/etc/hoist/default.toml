@@ -15,6 +15,8 @@ log_level = "info"
 default_profile = "default"
 
 [profile.default.cpu]
+# Enable CPU tweaks for this profile.
+enabled = true
 # TuneD profile to enter while hoist is active.
 enter_profile = "throughput-performance"
 # Restore previous TuneD profile when command exits.
@@ -25,6 +27,8 @@ restore_to_profile = "balanced"
 fallback_exit_profile = "balanced"
 
 [profile.default.gpu]
+# Keep disabled by default; GPU tuning can be risky.
+enabled = false
 # Supported GPU backend: amdgpu
 kind = "amdgpu"
 # DRM card number (card1 => 1).
@@ -67,10 +71,12 @@ start_sh = []
 stop_sh = []
 
 [profile.quiet.cpu]
+enabled = true
 enter_profile = "balanced"
 restore_previous = true
 
 [profile.quiet.gpu]
+enabled = false
 kind = "amdgpu"
 card = 1
 enter_level = "auto"

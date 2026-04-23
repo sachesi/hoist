@@ -62,10 +62,43 @@ fn read_ppid(pid: i32) -> Result<i32> {
     Ok(ppid)
 }
 
+fn read_pgid(pid: i32) -> Result<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let after = stat
+        .rsplit_once(") ")
+        .map(|(_, rest)| rest)
+        .context("malformed /proc stat")?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next();
+    let _ppid = fields.next().context("missing ppid")?;
+    let pgid = fields.next().context("missing pgid")?.parse::<i32>()?;
+    Ok(pgid)
+}
+
 pub fn kill_process_group(pgid: i32, sig: nix::sys::signal::Signal) -> Result<()> {
     let neg: pid_t = -pgid;
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(neg), sig)?;
     Ok(())
+}
+
+pub fn process_group_has_members(pgid: i32) -> Result<bool> {
+    if pgid <= 0 {
+        return Ok(false);
+    }
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        if let Ok(found_pgid) = read_pgid(pid)
+            && found_pgid == pgid
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use crate::config::{Config, GPUCTL_PATH, Profile, validate_profile_name};
-use crate::procutil::{discover_descendants, kill_process_group, renice_pid};
+use crate::procutil::{
+    discover_descendants, kill_process_group, process_group_has_members, renice_pid,
+};
 use crate::state::{RuntimeState, create_state_file};
 use crate::system::{
     gpuctl_exists, read_gpu_level, run_argv, run_pkexec_gpuctl, run_shell, tuned_active,
@@ -106,15 +108,18 @@ pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<
             }
         }
 
+        let poll_interval = Duration::from_millis(cfg.global.poll_interval_ms.unwrap_or(700));
         match waitpid(Pid::from_raw(child_pid), Some(WaitPidFlag::WNOHANG))? {
-            WaitStatus::StillAlive => std::thread::sleep(Duration::from_millis(
-                cfg.global.poll_interval_ms.unwrap_or(700),
-            )),
+            WaitStatus::StillAlive => std::thread::sleep(poll_interval),
             WaitStatus::Exited(_, code) => break code,
             WaitStatus::Signaled(_, sig, _) => break 128 + sig as i32,
             _ => {}
         }
     };
+
+    if let Some(pgid) = state.child_pgid {
+        wait_for_process_group_exit(pgid, cfg.global.poll_interval_ms.unwrap_or(700));
+    }
 
     restore_all(cfg, profile, &state)?;
     std::fs::remove_file(&state_path).ok();
@@ -130,44 +135,53 @@ fn read_signal(sfd: &SignalFd) -> Result<Option<Signal>> {
 
 fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Result<()> {
     if let Some(cpu) = &profile.cpu {
-        let prev = tuned_active()?;
-        state.previous_tuned_profile = prev;
-        eprintln!("hoist: applying tuned profile {}", cpu.enter_profile);
-        let result = tuned_set_profile(&cpu.enter_profile);
-        if let Err(e) = result {
-            if cfg.global.require_all {
-                return Err(e);
-            }
-            eprintln!("hoist: warning: {e}");
+        if !cpu.enabled() {
+            eprintln!("hoist: cpu tweaks disabled by profile");
         } else {
-            state.cpu_applied = true;
+            let prev = tuned_active()?;
+            state.previous_tuned_profile = prev;
+            eprintln!("hoist: applying tuned profile {}", cpu.enter_profile);
+            let result = tuned_set_profile(&cpu.enter_profile);
+            if let Err(e) = result {
+                if cfg.global.require_all {
+                    return Err(e);
+                }
+                eprintln!("hoist: warning: {e}");
+            } else {
+                state.cpu_applied = true;
+            }
         }
     }
 
     if let Some(gpu) = &profile.gpu {
-        if let Ok(prev) = read_gpu_level(gpu.card) {
-            state.previous_amdgpu_level = Some(prev.as_str().to_string());
-        }
-        eprintln!(
-            "hoist: setting amdgpu card{} level {}",
-            gpu.card,
-            gpu.enter_level.as_str()
-        );
-        let card = gpu.card.to_string();
-        let result = run_pkexec_gpuctl(&[
-            "apply",
-            "--card",
-            &card,
-            "--level",
-            gpu.enter_level.as_str(),
-        ]);
-        if let Err(e) = result {
-            if cfg.global.require_all {
-                return Err(e);
-            }
-            eprintln!("hoist: warning: {e}");
+        if !gpu.enabled() {
+            eprintln!("hoist: gpu tweaks disabled by profile");
         } else {
-            state.gpu_applied = true;
+            eprintln!("hoist: warning: gpu tweaks enabled; use at your own risk");
+            if let Ok(prev) = read_gpu_level(gpu.card) {
+                state.previous_amdgpu_level = Some(prev.as_str().to_string());
+            }
+            eprintln!(
+                "hoist: setting amdgpu card{} level {}",
+                gpu.card,
+                gpu.enter_level.as_str()
+            );
+            let card = gpu.card.to_string();
+            let result = run_pkexec_gpuctl(&[
+                "apply",
+                "--card",
+                &card,
+                "--level",
+                gpu.enter_level.as_str(),
+            ]);
+            if let Err(e) = result {
+                if cfg.global.require_all {
+                    return Err(e);
+                }
+                eprintln!("hoist: warning: {e}");
+            } else {
+                state.gpu_applied = true;
+            }
         }
     }
 
@@ -196,6 +210,7 @@ fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Res
 
 fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result<()> {
     if let Some(cpu) = &profile.cpu
+        && cpu.enabled()
         && state.cpu_applied
     {
         let target = choose_cpu_restore_target(cpu, state);
@@ -208,6 +223,7 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     }
 
     if let Some(gpu) = &profile.gpu
+        && gpu.enabled()
         && state.gpu_applied
     {
         let target = choose_gpu_restore_target(gpu, state);
@@ -236,6 +252,26 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     }
 
     Ok(())
+}
+
+fn wait_for_process_group_exit(pgid: i32, poll_interval_ms: u64) {
+    let poll_interval = Duration::from_millis(poll_interval_ms);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match process_group_has_members(pgid) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                eprintln!("hoist: warning: failed to inspect process group {pgid}: {e}");
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            eprintln!("hoist: warning: timed out waiting for process group {pgid} to exit");
+            break;
+        }
+        std::thread::sleep(poll_interval);
+    }
 }
 
 fn choose_cpu_restore_target(
@@ -308,11 +344,13 @@ pub fn inspect_group_membership() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AmdGpuLevel, CpuConfig, GpuConfig, GpuKind};
+    use crate::config::{AmdGpuLevel, Config, CpuConfig, Global, GpuConfig, GpuKind};
+    use std::collections::BTreeMap;
 
     #[test]
     fn cpu_restore_target_prefers_previous_then_restore_to_then_fallback() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: true,
             restore_to_profile: Some("balanced".into()),
@@ -335,6 +373,7 @@ mod tests {
     #[test]
     fn cpu_restore_target_uses_restore_to_when_restore_previous_disabled() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: false,
             restore_to_profile: Some("balanced".into()),
@@ -351,6 +390,7 @@ mod tests {
     #[test]
     fn gpu_restore_target_uses_restore_to_when_restore_previous_disabled() {
         let gpu = GpuConfig {
+            enabled: None,
             kind: GpuKind::Amdgpu,
             card: 1,
             enter_level: AmdGpuLevel::High,
@@ -369,6 +409,7 @@ mod tests {
     #[test]
     fn cpu_restore_target_uses_fallback_when_restore_previous_disabled_and_restore_to_missing() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: false,
             restore_to_profile: None,
@@ -385,6 +426,7 @@ mod tests {
     #[test]
     fn gpu_restore_target_uses_fallback_when_restore_previous_disabled_and_restore_to_missing() {
         let gpu = GpuConfig {
+            enabled: None,
             kind: GpuKind::Amdgpu,
             card: 1,
             enter_level: AmdGpuLevel::High,
@@ -397,6 +439,48 @@ mod tests {
         assert_eq!(
             choose_gpu_restore_target(&gpu, &state).as_deref(),
             Some("auto")
+        );
+    }
+
+    #[test]
+    fn wrapper_child_lifecycle_waits_for_process_group_members() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            crate::config::Profile {
+                cpu: None,
+                gpu: None,
+                process: None,
+                hooks: None,
+            },
+        );
+        let cfg = Config {
+            global: Global {
+                poll_interval_ms: Some(20),
+                require_all: false,
+                log_level: None,
+                default_profile: "default".to_string(),
+            },
+            profile: profiles,
+        };
+
+        let start = Instant::now();
+        let code = run_command(
+            &cfg,
+            "default",
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 0.35 & exit 0".to_string(),
+            ],
+        )
+        .expect("run command");
+        let elapsed = start.elapsed();
+
+        assert_eq!(code, 0);
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "expected wrapper-aware wait, got {elapsed:?}"
         );
     }
 }
