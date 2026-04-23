@@ -1,4 +1,3 @@
-use clap::ArgAction;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -13,8 +12,6 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     #[arg(long)]
     pub profile: Option<String>,
-    #[arg(long = "env", value_name = "KEY=VALUE", action = ArgAction::Append)]
-    pub env: Vec<String>,
     #[command(subcommand)]
     pub subcommand: Option<HoistSubcommand>,
     #[arg(last = true, trailing_var_arg = true)]

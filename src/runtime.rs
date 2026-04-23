@@ -1,5 +1,7 @@
 use crate::config::{Config, GPUCTL_PATH, Profile, validate_profile_name};
-use crate::procutil::{discover_descendants, kill_process_group, renice_pid};
+use crate::procutil::{
+    discover_descendants, kill_process_group, process_group_has_members, renice_pid,
+};
 use crate::state::{RuntimeState, create_state_file};
 use crate::system::{
     gpuctl_exists, read_gpu_level, run_argv, run_pkexec_gpuctl, run_shell, tuned_active,
@@ -15,12 +17,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub fn run_command(
-    cfg: &Config,
-    profile_name: &str,
-    argv: &[String],
-    env_overrides: &[String],
-) -> Result<i32> {
+pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<i32> {
     validate_profile_name(profile_name)?;
     if argv.is_empty() {
         bail!("missing command");
@@ -44,21 +41,8 @@ pub fn run_command(
     }
     state.save(&state_path)?;
 
-    let inline_env = parse_leading_env_assignments(argv);
-    let command_argv = &argv[inline_env.len()..];
-    if command_argv.is_empty() {
-        bail!("missing command");
-    }
-
-    let mut cmd = Command::new(&command_argv[0]);
-    cmd.args(&command_argv[1..]);
-
-    for (key, value) in parse_env_assignments(env_overrides)? {
-        cmd.env(key, value);
-    }
-    for (key, value) in parse_env_assignments(inline_env)? {
-        cmd.env(key, value);
-    }
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
     // SAFETY: pre_exec runs in child after fork and before exec for deterministic setpgid.
     unsafe {
         cmd.pre_exec(|| {
@@ -68,7 +52,7 @@ pub fn run_command(
 
     let child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn {}", command_argv[0]))
+        .with_context(|| format!("failed to spawn {}", argv[0]))
         .map_err(|e| {
             let _ = restore_all(cfg, profile, &state);
             e
@@ -124,15 +108,18 @@ pub fn run_command(
             }
         }
 
+        let poll_interval = Duration::from_millis(cfg.global.poll_interval_ms.unwrap_or(700));
         match waitpid(Pid::from_raw(child_pid), Some(WaitPidFlag::WNOHANG))? {
-            WaitStatus::StillAlive => std::thread::sleep(Duration::from_millis(
-                cfg.global.poll_interval_ms.unwrap_or(700),
-            )),
+            WaitStatus::StillAlive => std::thread::sleep(poll_interval),
             WaitStatus::Exited(_, code) => break code,
             WaitStatus::Signaled(_, sig, _) => break 128 + sig as i32,
             _ => {}
         }
     };
+
+    if let Some(pgid) = state.child_pgid {
+        wait_for_process_group_exit(pgid, cfg.global.poll_interval_ms.unwrap_or(700));
+    }
 
     restore_all(cfg, profile, &state)?;
     std::fs::remove_file(&state_path).ok();
@@ -267,44 +254,24 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     Ok(())
 }
 
-fn parse_leading_env_assignments(argv: &[String]) -> &[String] {
-    let mut idx = 0usize;
-    while idx < argv.len() && is_env_assignment(&argv[idx]) {
-        idx += 1;
-    }
-    &argv[..idx]
-}
-
-fn parse_env_assignments(raw: &[String]) -> Result<Vec<(&str, &str)>> {
-    let mut parsed = Vec::with_capacity(raw.len());
-    for item in raw {
-        let Some((key, value)) = item.split_once('=') else {
-            bail!("invalid --env '{item}', expected KEY=VALUE");
-        };
-        if !is_valid_env_key(key) {
-            bail!("invalid environment variable name '{key}'");
+fn wait_for_process_group_exit(pgid: i32, poll_interval_ms: u64) {
+    let poll_interval = Duration::from_millis(poll_interval_ms);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match process_group_has_members(pgid) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(e) => {
+                eprintln!("hoist: warning: failed to inspect process group {pgid}: {e}");
+                break;
+            }
         }
-        parsed.push((key, value));
+        if Instant::now() >= deadline {
+            eprintln!("hoist: warning: timed out waiting for process group {pgid} to exit");
+            break;
+        }
+        std::thread::sleep(poll_interval);
     }
-    Ok(parsed)
-}
-
-fn is_env_assignment(arg: &str) -> bool {
-    let Some((key, _)) = arg.split_once('=') else {
-        return false;
-    };
-    is_valid_env_key(key)
-}
-
-fn is_valid_env_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn choose_cpu_restore_target(
@@ -377,7 +344,8 @@ pub fn inspect_group_membership() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AmdGpuLevel, CpuConfig, GpuConfig, GpuKind};
+    use crate::config::{AmdGpuLevel, Config, CpuConfig, Global, GpuConfig, GpuKind};
+    use std::collections::BTreeMap;
 
     #[test]
     fn cpu_restore_target_prefers_previous_then_restore_to_then_fallback() {
@@ -475,14 +443,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_leading_env_assignments_stops_at_first_non_assignment() {
-        let argv = vec![
-            "FOO=1".to_string(),
-            "BAR=baz".to_string(),
-            "/bin/echo".to_string(),
-            "hello".to_string(),
-        ];
-        assert_eq!(parse_leading_env_assignments(&argv).len(), 2);
+    fn wrapper_child_lifecycle_waits_for_process_group_members() {
+        let mut profiles = BTreeMap::new();
+        profiles.insert(
+            "default".to_string(),
+            crate::config::Profile {
+                cpu: None,
+                gpu: None,
+                process: None,
+                hooks: None,
+            },
+        );
+        let cfg = Config {
+            global: Global {
+                poll_interval_ms: Some(20),
+                require_all: false,
+                log_level: None,
+                default_profile: "default".to_string(),
+            },
+            profile: profiles,
+        };
+
+        let start = Instant::now();
+        let code = run_command(
+            &cfg,
+            "default",
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 0.35 & exit 0".to_string(),
+            ],
+        )
+        .expect("run command");
+        let elapsed = start.elapsed();
+
+        assert_eq!(code, 0);
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "expected wrapper-aware wait, got {elapsed:?}"
+        );
     }
 }
 
