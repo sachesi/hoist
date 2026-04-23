@@ -1,0 +1,41 @@
+#compdef hoist
+
+_hoist() {
+  local -a subcommands
+  subcommands=(
+    'validate-config:Validate config file'
+    'print-config-paths:Print discovered config paths'
+    'inspect:Inspect runtime environment'
+    'helper-info:Print helper binary information'
+  )
+
+  _arguments -C \
+    '--config[Path to config file]:config file:_files' \
+    '--profile[Profile name]:profile:' \
+    '(-h --help)'{-h,--help}'[Print help]' \
+    '(-V --version)'{-V,--version}'[Print version]' \
+    '1:subcommand or command:->first' \
+    '*::args:->args'
+
+  case $state in
+    first)
+      _describe 'subcommand' subcommands
+      _command_names
+      ;;
+    args)
+      case ${words[2]} in
+        validate-config)
+          _arguments '--config[Path to config file]:config file:_files' '(-h --help)'{-h,--help}'[Print help]'
+          ;;
+        print-config-paths|inspect|helper-info)
+          _arguments '(-h --help)'{-h,--help}'[Print help]'
+          ;;
+        *)
+          _normal
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_hoist "$@"

@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust 1.95.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release
+        run: cargo build --release
+
+  rpm:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            git \
+            rpm \
+            rpm-build \
+            rust-packaging \
+            systemd-rpm-macros
+
+      - name: Install Rust 1.95.0
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain 1.95.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Parse spec
+        run: rpmspec -P hoist.spec >/tmp/hoist.spec.rendered
+
+      - name: Build RPM
+        run: |
+          mkdir -p rpmbuild/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+          git archive --format=tar.gz --prefix=hoist-0.1.0/ -o hoist-0.1.0.tar.gz HEAD
+          cp hoist.spec rpmbuild/SPECS/
+          cp hoist-0.1.0.tar.gz rpmbuild/SOURCES/
+          rpmbuild -bb rpmbuild/SPECS/hoist.spec --define "_topdir $(pwd)/rpmbuild"
+
+      - name: Verify RPM payload layout
+        run: |
+          set -euo pipefail
+          rpm_file=$(find rpmbuild/RPMS -name '*.rpm' | head -n1)
+          test -n "$rpm_file"
+          rpm -qlp "$rpm_file" > /tmp/hoist-rpm-files.txt
+
+          required=(
+            /usr/bin/hoist
+            /usr/libexec/hoist-gpuctl
+            /etc/hoist/default.toml
+            /etc/security/limits.d/10-hoist.conf
+            /usr/lib/sysusers.d/hoist.conf
+            /usr/share/polkit-1/actions/io.github.hoist.policy
+            /etc/polkit-1/rules.d/50-hoist.rules
+          )
+
+          for p in "${required[@]}"; do
+            grep -Fx "$p" /tmp/hoist-rpm-files.txt >/dev/null
+          done
+
+          

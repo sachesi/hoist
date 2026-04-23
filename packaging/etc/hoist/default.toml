@@ -1,0 +1,82 @@
+# hoist system configuration
+#
+# Config selection behavior:
+# 1) --config PATH uses only PATH.
+# 2) Else if ~/.config/hoist/default.toml exists, it fully replaces this file.
+# 3) Else /etc/hoist/default.toml is used.
+
+[global]
+# Main process poll interval (ms) while waiting for target process.
+poll_interval_ms = 700
+# If true, any tweak failure aborts launch and causes best-effort rollback.
+require_all = false
+log_level = "info"
+# Profile used when --profile is not set.
+default_profile = "default"
+
+[profile.default.cpu]
+# TuneD profile to enter while hoist is active.
+enter_profile = "throughput-performance"
+# Restore previous TuneD profile when command exits.
+restore_previous = true
+# Explicit TuneD profile to restore if restore to previous is not used.
+restore_to_profile = "balanced"
+# Fallback used when previous profile cannot be detected.
+fallback_exit_profile = "balanced"
+
+[profile.default.gpu]
+# Supported GPU backend: amdgpu
+kind = "amdgpu"
+# DRM card number (card1 => 1).
+card = 1
+# Enter AMDGPU performance level while active.
+enter_level = "high"
+# Restore previous GPU performance level when command exits.
+restore_previous = true
+# Explicit GPU performance level to restore if restore to previous is not used.
+restore_to_level = "auto"
+fallback_exit_level = "auto"
+
+[profile.default.process]
+# Max -15
+nice = -10
+# Renice descendants by /proc scan.
+renice_descendants = true
+renice_interval_ms = 700
+
+[profile.default.hooks]
+# Non-root hooks.
+# argv hooks are arrays of argv arrays and require absolute executable paths.
+# shell hooks are short inline snippets run via /bin/sh -c.
+# Keep disabled by default; uncomment and adjust to enable.
+# start = [
+#   ["/absolute/path/to/start-hook"]
+# ]
+# stop = [
+#   ["/absolute/path/to/stop-hook"]
+# ]
+# start_sh = [
+#   "echo start >> /tmp/hoist.log"
+# ]
+# stop_sh = [
+#   "echo stop >> /tmp/hoist.log"
+# ]
+start = []
+stop = []
+start_sh = []
+stop_sh = []
+
+[profile.quiet.cpu]
+enter_profile = "balanced"
+restore_previous = true
+
+[profile.quiet.gpu]
+kind = "amdgpu"
+card = 1
+enter_level = "auto"
+restore_previous = true
+
+[profile.quiet.process]
+nice = 0
+renice_descendants = false
+renice_interval_ms = 1000

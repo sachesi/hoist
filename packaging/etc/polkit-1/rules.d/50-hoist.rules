@@ -1,0 +1,5 @@
+polkit.addRule(function(action, subject) {
+  if (action.id == "io.github.hoist.gpuctl" && subject.isInGroup("hoist")) {
+    return polkit.Result.YES;
+  }
+});

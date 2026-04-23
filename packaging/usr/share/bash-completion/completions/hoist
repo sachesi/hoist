@@ -1,0 +1,33 @@
+# bash completion for hoist
+_hoist() {
+    local cur prev words cword
+    _init_completion || return
+
+    local subcommands="validate-config print-config-paths inspect helper-info"
+    local global_opts="--config --profile --help --version"
+
+    case "${words[1]}" in
+        validate-config)
+            COMPREPLY=( $(compgen -W "--config --help" -- "$cur") )
+            return
+            ;;
+        print-config-paths|inspect|helper-info)
+            COMPREPLY=( $(compgen -W "--help" -- "$cur") )
+            return
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$global_opts" -- "$cur") )
+        return
+    fi
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$subcommands" -- "$cur") )
+        return
+    fi
+
+    COMPREPLY=( $(compgen -c -- "$cur") )
+}
+
+complete -F _hoist hoist
