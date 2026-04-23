@@ -1,28 +1,22 @@
 # hoist
 
-`hoist` is a minimal Linux CLI that applies temporary performance tweaks to one launched command and restores previous state when it exits.
+`hoist` is a Linux CLI wrapper that applies temporary system tuning to one launched command and restores state when that command exits.
 
-## Features
+## What hoist does
 
-- No daemon/service.
-- Frontend binary: `/usr/bin/hoist`.
-- CPU profile switching uses direct `tuned-adm` calls (no pkexec helper).
-- GPU level switching uses privileged helper `/usr/libexec/hoist-gpuctl` via `pkexec` + polkit.
-- Process renice and optional descendant renice scanning via `/proc`.
-- Non-root hooks from selected TOML config (argv and inline shell snippets).
-- Best-effort restore on normal exit and on SIGINT/SIGTERM.
+- Runs one target command and waits for it to finish.
+- Applies optional CPU tuning via `tuned-adm` while the target is running.
+- Applies optional AMDGPU performance-level tuning via `hoist-gpuctl` (`pkexec`/polkit) while the target is running.
+- Optionally adjusts process priority (`nice`) and descendant priorities.
+- Executes optional start/stop hooks from config.
+- Performs best-effort restore on normal exit and on SIGINT/SIGTERM.
 
 ## Privilege model
 
 - `hoist` itself runs unprivileged.
-- CPU profile changes rely on `tuned-adm` behavior on the host.
-- AMDGPU level changes are performed only through `/usr/libexec/hoist-gpuctl`, invoked by `pkexec`.
-- The helper requires root (`EUID=0`) and only accepts structured CLI arguments.
-- Policy and group scoping are shipped in:
-  - `/usr/share/polkit-1/actions/io.github.hoist.policy`
-  - `/etc/polkit-1/rules.d/50-hoist.rules`
-  - `/usr/lib/sysusers.d/hoist.conf`
-  - `/etc/security/limits.d/10-hoist.conf`
+- CPU profile changes use `tuned-adm` on the host.
+- GPU changes are performed only through `/usr/libexec/hoist-gpuctl` via `pkexec`.
+- Policy and access scoping are shipped with the package (`polkit`, sysusers, limits files).
 
 ## Build
 
@@ -30,11 +24,12 @@
 cargo build --release
 ```
 
-Binaries:
+Produced binaries:
+
 - `target/release/hoist`
 - `target/release/hoist-gpuctl`
 
-## Usage
+## Command usage
 
 ```bash
 hoist [--config PATH] [--profile NAME] <command> [args...]
@@ -44,33 +39,9 @@ hoist inspect
 hoist helper-info
 ```
 
-## Steam launch options (native + Flatpak Steam)
+## Config behavior
 
-`hoist` can be used as a Steam launch option wrapper:
-
-```bash
-hoist -- %command%
-```
-
-For GameMode-style launch options with environment prefixes:
-
-```bash
-MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %command%
-```
-
-For Flatpak Steam, keep the exact same launch option command (`... hoist -- %command%`), and do a one-time PATH override so `hoist` resolves inside the sandbox:
-
-```bash
-flatpak override --user --env=PATH='/app/bin:/usr/bin:/run/host/usr/bin' com.valvesoftware.Steam
-```
-
-After this one-time setup, the same GameMode-style command works in both native and Flatpak Steam:
-
-```bash
-MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %command%
-```
-
-## Config selection behavior
+Config file selection:
 
 1. `--config PATH` uses only `PATH`.
 2. Else if `~/.config/hoist/default.toml` exists, it fully replaces `/etc/hoist/default.toml`.
@@ -78,9 +49,50 @@ MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %co
 
 No merge is performed.
 
-Packaged default config path: `/etc/hoist/default.toml`.
-User override path: `~/.config/hoist/default.toml`.
+Paths:
+
+- System config: `/etc/hoist/default.toml`
+- User override: `~/.config/hoist/default.toml`
+
+### CPU/GPU enable toggles
+
+Per-profile CPU and GPU blocks support `enabled`:
+
+- `cpu.enabled`: defaults to `true` when omitted.
+- `gpu.enabled`: defaults to `false` when omitted.
+
+When GPU tuning is enabled, hoist prints a warning indicating it should be used with care.
+
+## Steam launch option usage
+
+Use hoist as the launch wrapper command:
+
+```bash
+hoist -- %command%
+```
+
+Environment prefixes are also supported by Steam shell launch options, for example:
+
+```bash
+VAR1=value1 VAR2=value2 hoist -- %command%
+```
+
+## Flatpak Steam notes and limitations
+
+- The public launch command remains the same:
+
+  ```bash
+  hoist -- %command%
+  ```
+
+- In some Flatpak Steam setups, `hoist` may not be resolvable inside the sandbox by default (`/bin/sh: hoist: command not found`).
+- Current status: this is a known limitation unless sandbox PATH/host binary visibility is configured in the Flatpak environment.
+- hoist does not introduce an alternate public command name for Flatpak.
+
+## Lifecycle behavior
+
+`hoist` waits for the direct child process and then also waits for remaining members of the launched process group (bounded wait) before restore. This improves behavior for wrapper-style launch chains.
 
 ## Shell completions
 
-When installed from the RPM package, shell completions are installed for bash, fish, and zsh.
+When installed from the RPM package, completions are installed for bash, fish, and zsh.
