@@ -58,13 +58,17 @@ For GameMode-style launch options with environment prefixes:
 MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %command%
 ```
 
-For Flatpak Steam, the sandbox does not include `hoist` on `PATH`. Use the host-mounted wrapper entrypoint:
+For Flatpak Steam, keep the exact same launch option command (`... hoist -- %command%`), and do a one-time PATH override so `hoist` resolves inside the sandbox:
 
 ```bash
-MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 /run/host/usr/bin/hoist-flatpak -- %command%
+flatpak override --user --env=PATH='/app/bin:/usr/bin:/run/host/usr/bin' com.valvesoftware.Steam
 ```
 
-`hoist-flatpak` is a tiny wrapper that execs `/run/host/usr/bin/hoist`, so the same GameMode-style launch syntax works from inside the Flatpak sandbox.
+After this one-time setup, the same GameMode-style command works in both native and Flatpak Steam:
+
+```bash
+MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %command%
+```
 
 ## Config selection behavior
 

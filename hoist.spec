@@ -37,7 +37,6 @@ cargo build --release --frozen --offline --bins
 
 %install
 install -Dpm 0755 target/release/hoist %{buildroot}%{_bindir}/hoist
-install -Dpm 0755 packaging/usr/bin/hoist-flatpak %{buildroot}%{_bindir}/hoist-flatpak
 install -Dpm 0755 target/release/hoist-gpuctl %{buildroot}%{_libexecdir}/hoist-gpuctl
 
 install -Dpm 0644 packaging/usr/share/bash-completion/completions/hoist \
@@ -68,7 +67,6 @@ install -Dpm 0644 packaging/etc/polkit-1/rules.d/50-hoist.rules \
 %doc README.md
 
 %{_bindir}/hoist
-%{_bindir}/hoist-flatpak
 %{_libexecdir}/hoist-gpuctl
 
 %config(noreplace) %{_sysconfdir}/hoist/default.toml
