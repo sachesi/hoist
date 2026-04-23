@@ -58,7 +58,13 @@ For GameMode-style launch options with environment prefixes:
 MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 hoist -- %command%
 ```
 
-This works in native Steam and keeps `hoist` CLI usage unchanged. For Flatpak Steam, wrapper/process lifetime behavior can differ, so `hoist` waits for the launched process group to fully exit before restoring tweaks.
+For Flatpak Steam, the sandbox does not include `hoist` on `PATH`. Use the host-mounted wrapper entrypoint:
+
+```bash
+MANGOHUD=1 DXVK_CONFIG_FILE="$HOME/.dxvk/dxvk.conf" OBS_VKCAPTURE=1 /run/host/usr/bin/hoist-flatpak -- %command%
+```
+
+`hoist-flatpak` is a tiny wrapper that execs `/run/host/usr/bin/hoist`, so the same GameMode-style launch syntax works from inside the Flatpak sandbox.
 
 ## Config selection behavior
 

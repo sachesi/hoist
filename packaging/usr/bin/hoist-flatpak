@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+HOST_HOIST="/run/host/usr/bin/hoist"
+
+if [ ! -x "$HOST_HOIST" ]; then
+    echo "hoist-flatpak: host hoist binary not found at $HOST_HOIST" >&2
+    echo "hoist-flatpak: install hoist on the host system first" >&2
+    exit 127
+fi
+
+exec "$HOST_HOIST" "$@"
