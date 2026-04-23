@@ -92,7 +92,3 @@ VAR1=value1 VAR2=value2 hoist -- %command%
 ## Lifecycle behavior
 
 `hoist` waits for the direct child process and then also waits for remaining members of the launched process group (bounded wait) before restore. This improves behavior for wrapper-style launch chains.
-
-## Shell completions
-
-When installed from the RPM package, completions are installed for bash, fish, and zsh.

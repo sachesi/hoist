@@ -1,5 +1,5 @@
 Name:           hoist
-Version:        0.2.3
+Version:        0.2.4
 Release:        5%{?dist}
 Summary:        Minimal per-command Linux performance tweak wrapper
 
@@ -79,3 +79,10 @@ install -Dpm 0644 packaging/etc/polkit-1/rules.d/50-hoist.rules \
 %{_datadir}/bash-completion/completions/hoist
 %{_datadir}/fish/vendor_completions.d/hoist.fish
 %{_datadir}/zsh/site-functions/_hoist
+
+%changelog
+* Thu Apr 23 2026 hoist maintainers
+- 0.2.4
+- add per-profile CPU/GPU enabled toggles (CPU default enabled, GPU default disabled)
+- improve wrapper lifecycle handling by waiting for launched process-group members before restore
+- refresh README for hoist-focused usage and Flatpak limitation notes
