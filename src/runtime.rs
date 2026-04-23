@@ -15,7 +15,12 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<i32> {
+pub fn run_command(
+    cfg: &Config,
+    profile_name: &str,
+    argv: &[String],
+    env_overrides: &[String],
+) -> Result<i32> {
     validate_profile_name(profile_name)?;
     if argv.is_empty() {
         bail!("missing command");
@@ -39,8 +44,21 @@ pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<
     }
     state.save(&state_path)?;
 
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
+    let inline_env = parse_leading_env_assignments(argv);
+    let command_argv = &argv[inline_env.len()..];
+    if command_argv.is_empty() {
+        bail!("missing command");
+    }
+
+    let mut cmd = Command::new(&command_argv[0]);
+    cmd.args(&command_argv[1..]);
+
+    for (key, value) in parse_env_assignments(env_overrides)? {
+        cmd.env(key, value);
+    }
+    for (key, value) in parse_env_assignments(inline_env)? {
+        cmd.env(key, value);
+    }
     // SAFETY: pre_exec runs in child after fork and before exec for deterministic setpgid.
     unsafe {
         cmd.pre_exec(|| {
@@ -50,7 +68,7 @@ pub fn run_command(cfg: &Config, profile_name: &str, argv: &[String]) -> Result<
 
     let child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn {}", argv[0]))
+        .with_context(|| format!("failed to spawn {}", command_argv[0]))
         .map_err(|e| {
             let _ = restore_all(cfg, profile, &state);
             e
@@ -130,44 +148,53 @@ fn read_signal(sfd: &SignalFd) -> Result<Option<Signal>> {
 
 fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Result<()> {
     if let Some(cpu) = &profile.cpu {
-        let prev = tuned_active()?;
-        state.previous_tuned_profile = prev;
-        eprintln!("hoist: applying tuned profile {}", cpu.enter_profile);
-        let result = tuned_set_profile(&cpu.enter_profile);
-        if let Err(e) = result {
-            if cfg.global.require_all {
-                return Err(e);
-            }
-            eprintln!("hoist: warning: {e}");
+        if !cpu.enabled() {
+            eprintln!("hoist: cpu tweaks disabled by profile");
         } else {
-            state.cpu_applied = true;
+            let prev = tuned_active()?;
+            state.previous_tuned_profile = prev;
+            eprintln!("hoist: applying tuned profile {}", cpu.enter_profile);
+            let result = tuned_set_profile(&cpu.enter_profile);
+            if let Err(e) = result {
+                if cfg.global.require_all {
+                    return Err(e);
+                }
+                eprintln!("hoist: warning: {e}");
+            } else {
+                state.cpu_applied = true;
+            }
         }
     }
 
     if let Some(gpu) = &profile.gpu {
-        if let Ok(prev) = read_gpu_level(gpu.card) {
-            state.previous_amdgpu_level = Some(prev.as_str().to_string());
-        }
-        eprintln!(
-            "hoist: setting amdgpu card{} level {}",
-            gpu.card,
-            gpu.enter_level.as_str()
-        );
-        let card = gpu.card.to_string();
-        let result = run_pkexec_gpuctl(&[
-            "apply",
-            "--card",
-            &card,
-            "--level",
-            gpu.enter_level.as_str(),
-        ]);
-        if let Err(e) = result {
-            if cfg.global.require_all {
-                return Err(e);
-            }
-            eprintln!("hoist: warning: {e}");
+        if !gpu.enabled() {
+            eprintln!("hoist: gpu tweaks disabled by profile");
         } else {
-            state.gpu_applied = true;
+            eprintln!("hoist: warning: gpu tweaks enabled; use at your own risk");
+            if let Ok(prev) = read_gpu_level(gpu.card) {
+                state.previous_amdgpu_level = Some(prev.as_str().to_string());
+            }
+            eprintln!(
+                "hoist: setting amdgpu card{} level {}",
+                gpu.card,
+                gpu.enter_level.as_str()
+            );
+            let card = gpu.card.to_string();
+            let result = run_pkexec_gpuctl(&[
+                "apply",
+                "--card",
+                &card,
+                "--level",
+                gpu.enter_level.as_str(),
+            ]);
+            if let Err(e) = result {
+                if cfg.global.require_all {
+                    return Err(e);
+                }
+                eprintln!("hoist: warning: {e}");
+            } else {
+                state.gpu_applied = true;
+            }
         }
     }
 
@@ -196,6 +223,7 @@ fn apply_start(cfg: &Config, profile: &Profile, state: &mut RuntimeState) -> Res
 
 fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result<()> {
     if let Some(cpu) = &profile.cpu
+        && cpu.enabled()
         && state.cpu_applied
     {
         let target = choose_cpu_restore_target(cpu, state);
@@ -208,6 +236,7 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     }
 
     if let Some(gpu) = &profile.gpu
+        && gpu.enabled()
         && state.gpu_applied
     {
         let target = choose_gpu_restore_target(gpu, state);
@@ -236,6 +265,46 @@ fn restore_all(_cfg: &Config, profile: &Profile, state: &RuntimeState) -> Result
     }
 
     Ok(())
+}
+
+fn parse_leading_env_assignments(argv: &[String]) -> &[String] {
+    let mut idx = 0usize;
+    while idx < argv.len() && is_env_assignment(&argv[idx]) {
+        idx += 1;
+    }
+    &argv[..idx]
+}
+
+fn parse_env_assignments(raw: &[String]) -> Result<Vec<(&str, &str)>> {
+    let mut parsed = Vec::with_capacity(raw.len());
+    for item in raw {
+        let Some((key, value)) = item.split_once('=') else {
+            bail!("invalid --env '{item}', expected KEY=VALUE");
+        };
+        if !is_valid_env_key(key) {
+            bail!("invalid environment variable name '{key}'");
+        }
+        parsed.push((key, value));
+    }
+    Ok(parsed)
+}
+
+fn is_env_assignment(arg: &str) -> bool {
+    let Some((key, _)) = arg.split_once('=') else {
+        return false;
+    };
+    is_valid_env_key(key)
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn choose_cpu_restore_target(
@@ -313,6 +382,7 @@ mod tests {
     #[test]
     fn cpu_restore_target_prefers_previous_then_restore_to_then_fallback() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: true,
             restore_to_profile: Some("balanced".into()),
@@ -335,6 +405,7 @@ mod tests {
     #[test]
     fn cpu_restore_target_uses_restore_to_when_restore_previous_disabled() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: false,
             restore_to_profile: Some("balanced".into()),
@@ -351,6 +422,7 @@ mod tests {
     #[test]
     fn gpu_restore_target_uses_restore_to_when_restore_previous_disabled() {
         let gpu = GpuConfig {
+            enabled: None,
             kind: GpuKind::Amdgpu,
             card: 1,
             enter_level: AmdGpuLevel::High,
@@ -369,6 +441,7 @@ mod tests {
     #[test]
     fn cpu_restore_target_uses_fallback_when_restore_previous_disabled_and_restore_to_missing() {
         let cpu = CpuConfig {
+            enabled: None,
             enter_profile: "throughput-performance".into(),
             restore_previous: false,
             restore_to_profile: None,
@@ -385,6 +458,7 @@ mod tests {
     #[test]
     fn gpu_restore_target_uses_fallback_when_restore_previous_disabled_and_restore_to_missing() {
         let gpu = GpuConfig {
+            enabled: None,
             kind: GpuKind::Amdgpu,
             card: 1,
             enter_level: AmdGpuLevel::High,
@@ -398,6 +472,17 @@ mod tests {
             choose_gpu_restore_target(&gpu, &state).as_deref(),
             Some("auto")
         );
+    }
+
+    #[test]
+    fn parse_leading_env_assignments_stops_at_first_non_assignment() {
+        let argv = vec![
+            "FOO=1".to_string(),
+            "BAR=baz".to_string(),
+            "/bin/echo".to_string(),
+            "hello".to_string(),
+        ];
+        assert_eq!(parse_leading_env_assignments(&argv).len(), 2);
     }
 }
 

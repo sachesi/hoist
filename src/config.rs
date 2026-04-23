@@ -45,6 +45,8 @@ pub struct Profile {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CpuConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
     pub enter_profile: String,
     pub restore_previous: bool,
     pub restore_to_profile: Option<String>,
@@ -54,12 +56,26 @@ pub struct CpuConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GpuConfig {
+    #[serde(default)]
+    pub enabled: Option<bool>,
     pub kind: GpuKind,
     pub card: u32,
     pub enter_level: AmdGpuLevel,
     pub restore_previous: bool,
     pub restore_to_level: Option<AmdGpuLevel>,
     pub fallback_exit_level: Option<AmdGpuLevel>,
+}
+
+impl CpuConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+impl GpuConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -329,5 +345,39 @@ stop_sh = []
         let cfg: Config = toml::from_str(raw).expect("parse");
         let err = validate_config(&cfg).expect_err("must reject");
         assert!(err.to_string().contains("start_sh"));
+    }
+
+    #[test]
+    fn cpu_enabled_defaults_true_when_omitted() {
+        let raw = r#"
+[global]
+require_all = false
+default_profile = "default"
+
+[profile.default.cpu]
+enter_profile = "throughput-performance"
+restore_previous = true
+"#;
+        let cfg: Config = toml::from_str(raw).expect("parse");
+        let cpu = cfg.profile["default"].cpu.as_ref().expect("cpu");
+        assert!(cpu.enabled());
+    }
+
+    #[test]
+    fn gpu_enabled_defaults_false_when_omitted() {
+        let raw = r#"
+[global]
+require_all = false
+default_profile = "default"
+
+[profile.default.gpu]
+kind = "amdgpu"
+card = 1
+enter_level = "high"
+restore_previous = true
+"#;
+        let cfg: Config = toml::from_str(raw).expect("parse");
+        let gpu = cfg.profile["default"].gpu.as_ref().expect("gpu");
+        assert!(!gpu.enabled());
     }
 }

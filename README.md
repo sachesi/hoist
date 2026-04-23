@@ -38,11 +38,28 @@ Binaries:
 
 ```bash
 hoist [--config PATH] [--profile NAME] <command> [args...]
+hoist [--config PATH] [--profile NAME] [--env KEY=VALUE ...] <command> [args...]
 hoist validate-config [--config PATH]
 hoist print-config-paths
 hoist inspect
 hoist helper-info
 ```
+
+## Steam launch options (native + Flatpak Steam)
+
+`hoist` can be used as a Steam launch option wrapper:
+
+```bash
+hoist -- %command%
+```
+
+When Steam launch options contain env assignments, `%command%` expansion and quoting can vary across wrappers. `hoist` now supports explicit env injection so variables are not lost:
+
+```bash
+hoist --env DXVK_CONFIG_FILE=$HOME/.dxvk/dxvk.conf --env OBS_VKCAPTURE=1 -- %command%
+```
+
+This syntax is recommended for both native Steam and Flatpak Steam because it avoids relying on shell-style env prefixes in launch options.
 
 ## Config selection behavior
 

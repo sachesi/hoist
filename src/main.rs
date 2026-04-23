@@ -58,7 +58,7 @@ fn real_main() -> Result<()> {
         .as_deref()
         .unwrap_or(cfg.global.default_profile.as_str());
 
-    let code = run_command(&cfg, profile, &cli.command)?;
+    let code = run_command(&cfg, profile, &cli.command, &cli.env)?;
     std::process::exit(code)
 }
 
